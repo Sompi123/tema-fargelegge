@@ -1,0 +1,365 @@
+    {% comment %}
+     Snippet for handling image uploads based on product variants.
+     - Shows/hides upload section based on selected variant (1, 5, 10, 20).
+     - Manages file selection (multiple rounds), preview, and reset.
+     - Updates the file input's 'files' property for form submission.
+     - Disables other variants after upload.
+     - Provides delete button.
+     - Assumes validation BEFORE submission happens in product-form.js.
+    {% endcomment %}
+
+    <div id="uploadSection-{{ section.id }}" class="upload-section" style="display:none; margin-top: 15px;">
+      {% comment %} The actual file input, hidden from user {% endcomment %}
+      <input
+        id="fileUploader-{{ section.id }}"
+        type="file"
+        name="properties[Bilder]" {% comment %} Changed name to match product-form.js {% endcomment %}
+        multiple
+        accept="image/*,.heic,.heif" {% comment %} Added HEIC/HEIF common on iOS {% endcomment %}
+        style="display:none;"
+        data-section-id="{{ section.id }}"
+      >
+      {% comment %} Button to trigger the hidden file input {% endcomment %}
+      <button id="triggerUpload-{{ section.id }}" type="button" class="button upload-trigger-button">
+        Last opp bilde(r)
+      </button>
+      {% comment %} Area to show names of selected files {% endcomment %}
+      <div id="filePreview-{{ section.id }}" class="file-preview" style="margin-top: 10px; font-size: 0.9em;">Ingen filer valgt</div>
+      {% comment %} Button to clear selected files {% endcomment %}
+      <button id="deleteButton-{{ section.id }}" type="button" class="button delete-button" style="display:none; margin-top: 10px;">
+        Slett alle bilder
+      </button>
+      {% comment %} Error message area (used for local errors like selecting too many files) {% endcomment %}
+      <p id="fileError-{{ section.id }}" class="file-error" style="color:red; display:none; margin-top: 5px;"></p>
+    </div>
+
+    <script>
+      document.addEventListener('DOMContentLoaded', () => {
+        const sectionId = '{{ section.id }}';
+        const fileInput = document.getElementById(`fileUploader-${sectionId}`);
+        const preview = document.getElementById(`filePreview-${sectionId}`);
+        const uploadSection = document.getElementById(`uploadSection-${sectionId}`);
+        const deleteButton = document.getElementById(`deleteButton-${sectionId}`);
+        const fileError = document.getElementById(`fileError-${sectionId}`);
+        const uploadTrigger = document.getElementById(`triggerUpload-${sectionId}`);
+
+        // Find the parent form and variant radios
+        const productForm = fileInput.closest('form');
+        const variantRadios = productForm ? productForm.querySelectorAll('input[type="radio"][name="id"]') : [];
+
+        // Basic checks for essential elements
+        if (!productForm) {
+            console.error(`[Upload Script ${sectionId}] Finner ikke <form>.`);
+            return;
+        }
+        if (!fileInput || !preview || !uploadSection || !deleteButton || !fileError || !uploadTrigger) {
+             console.error(`[Upload Script ${sectionId}] Finner ikke et eller flere nødvendige elementer (input, preview, section, delete, error, trigger).`);
+             return;
+        }
+         if (variantRadios.length === 0) {
+             console.warn(`[Upload Script ${sectionId}] Finner ingen variant radio-knapper ([name="id"]).`);
+         }
+
+        // --- State Variables ---
+        let allFiles = []; // Array to hold File objects across multiple selections
+        let selectedVariantConfig = null; // Holds {min, max, value} for the current variant
+        let maxAllowed = 0; // Max files allowed for the selected variant
+
+        // --- Configuration ---
+        const rangeMap = {
+            1: { min: 1, max: 1, value: 1 },
+            5: { min: 2, max: 5, value: 5 },
+            10: { min: 6, max: 10, value: 10 },
+            20: { min: 11, max: 20, value: 20 }
+        };
+
+        // --- Helper Functions ---
+
+        // Gets the range config based on a radio button's label text
+        function getRangeConfigFromRadio(radioElement) {
+            if (!productForm || !radioElement) return null;
+            // Prefer data-label if available, otherwise query the label element
+            const labelText = radioElement.dataset.label || (productForm.querySelector(`label[for="${radioElement.id}"]`)?.textContent || "");
+            const match = labelText.trim().match(/\b(1|5|10|20)\b/); // Match 1, 5, 10, or 20
+            if (match) {
+                const num = parseInt(match[1], 10);
+                if (rangeMap[num]) return rangeMap[num];
+            }
+            // console.warn(`[Upload Script ${sectionId}] Fant ikke config for radio ID: ${radioElement.id} fra label: "${labelText}"`);
+            return null;
+        }
+
+        // Disables other variant radios, keeping the one matching keepValue enabled
+        function disableOtherRadios(keepValue) {
+            variantRadios.forEach(radio => {
+                const config = getRangeConfigFromRadio(radio);
+                const label = productForm.querySelector(`label[for="${radio.id}"]`);
+                // Disable if it's not the one we want to keep, OR if it doesn't have a config (isn't 1,5,10,20)
+                if (!config || config.value !== keepValue) {
+                    radio.disabled = true;
+                    if (label) label.classList.add('disabled-variant-label');
+                } else {
+                    radio.disabled = false; // Ensure the selected one is enabled
+                    if (label) label.classList.remove('disabled-variant-label');
+                }
+            });
+        }
+
+        // Enables all variant radios
+        function enableRadios() {
+            variantRadios.forEach(radio => {
+                radio.disabled = false;
+                const label = productForm.querySelector(`label[for="${radio.id}"]`);
+                if (label) label.classList.remove('disabled-variant-label');
+            });
+        }
+
+        // Updates the file preview area
+        function renderPreview() {
+            preview.innerHTML = allFiles.length ? '' : 'Ingen filer valgt'; // Clear or set default text
+            allFiles.forEach((file, index) => {
+                const div = document.createElement('div');
+                div.textContent = `${index + 1}. ${file.name}`; // Display file name with index
+                preview.appendChild(div);
+            });
+            // Show delete button only if files are selected
+            deleteButton.style.display = allFiles.length > 0 ? 'inline-block' : 'none';
+        }
+
+        // Resets the entire upload state
+        function resetUpload() {
+            console.log(`[Upload Script ${sectionId}] Nullstiller opplasting...`);
+            allFiles = []; // Clear internal file array
+            fileInput.value = ''; // Clear the visible input value (important!)
+            // Reset the actual files property on the input element
+            const dataTransfer = new DataTransfer();
+            fileInput.files = dataTransfer.files;
+
+            renderPreview(); // Update UI
+            enableRadios(); // Re-enable all variant choices
+            fileError.style.display = 'none'; // Hide any previous errors
+            fileError.textContent = '';
+
+            // Reset state variables
+            selectedVariantConfig = null;
+            maxAllowed = 0;
+
+            // Re-evaluate the currently selected variant to show/hide section correctly
+            let checkedRadio = Array.from(variantRadios).find(radio => radio.checked);
+            if (checkedRadio) {
+                handleVariantChange(checkedRadio); // Update state based on current selection
+            } else {
+                if (uploadSection) uploadSection.style.display = 'none'; // Hide if nothing selected
+            }
+        }
+
+        // Updates state based on the selected variant radio button
+        function handleVariantChange(radioElement) {
+            const config = getRangeConfigFromRadio(radioElement);
+            fileError.style.display = 'none'; // Hide errors on variant change
+
+            if (config) {
+                // If the new variant requires uploads
+                selectedVariantConfig = config;
+                maxAllowed = config.max;
+                if (uploadSection) uploadSection.style.display = 'block'; // Show the section
+                console.log(`[Upload Script ${sectionId}] Variant endret/lastet: Verdi=${config.value}, Maks=${maxAllowed}`);
+            } else {
+                // If the new variant does NOT require uploads
+                if (uploadSection) uploadSection.style.display = 'none'; // Hide the section
+                selectedVariantConfig = null;
+                maxAllowed = 0;
+                console.log(`[Upload Script ${sectionId}] Variant krever ikke opplasting, skjuler seksjon.`);
+            }
+        }
+
+        // --- Event Listeners ---
+
+        // Handle variant changes ONLY if no files are uploaded yet
+        variantRadios.forEach(radio => {
+            radio.addEventListener('change', () => {
+                if (allFiles.length === 0) {
+                    // If no files uploaded, allow changing variant and update UI
+                    handleVariantChange(radio);
+                } else {
+                    // If files ARE uploaded, prevent changing variant
+                    console.warn(`[Upload Script ${sectionId}] Filer er lastet opp, hindrer bytte av variant.`);
+                    // Re-check the radio that corresponds to the config we locked to
+                    const currentSelectedValue = selectedVariantConfig ? selectedVariantConfig.value : null;
+                    let originalRadioFound = false;
+                    variantRadios.forEach(r => {
+                        const rConfig = getRangeConfigFromRadio(r);
+                        if (rConfig && rConfig.value === currentSelectedValue) {
+                            r.checked = true; // Re-select the original variant
+                            originalRadioFound = true;
+                        } else {
+                            r.checked = false;
+                        }
+                    });
+                    // If somehow the original couldn't be re-selected, uncheck the clicked one
+                    if (!originalRadioFound) radio.checked = false;
+
+                    // Show error message
+                    fileError.textContent = 'Slett eksisterende bilder før du bytter antall.';
+                    fileError.style.display = 'block';
+                }
+            });
+            // Set initial state based on the initially checked radio
+            if (radio.checked) {
+                handleVariantChange(radio);
+            }
+        });
+
+        // Trigger hidden file input when custom button is clicked
+        uploadTrigger.addEventListener('click', () => {
+            fileError.style.display = 'none'; // Hide error before opening dialog
+            fileInput.click();
+        });
+
+        // Handle file selection from the input dialog
+        fileInput.addEventListener('change', (e) => {
+            const newFiles = Array.from(e.target.files);
+            console.log(`[Upload Script ${sectionId}] Filer valgt: ${newFiles.length}`);
+
+            // Ensure a variant requiring upload is selected
+            if (!selectedVariantConfig) {
+                console.error(`[Upload Script ${sectionId}] Kan ikke legge til filer: Ingen gyldig variant valgt.`);
+                fileError.textContent = 'Velg et antall bilder (1, 5, 10, eller 20) før du laster opp.';
+                fileError.style.display = 'block';
+                fileInput.value = ''; // Clear the selection
+                return;
+            }
+
+            // Prevent adding more files than the maximum allowed for the variant
+            if (allFiles.length + newFiles.length > maxAllowed) {
+                console.warn(`[Upload Script ${sectionId}] For mange filer valgt.`);
+                fileError.textContent = `Du kan maksimalt ha ${maxAllowed} bilder for variant "${selectedVariantConfig.value}". Du har ${allFiles.length}, kan legge til ${maxAllowed - allFiles.length} til.`;
+                fileError.style.display = 'block';
+                fileInput.value = ''; // Clear the selection
+                return;
+            }
+
+            // Add new files to our internal array
+            allFiles = allFiles.concat(newFiles);
+
+            // IMPORTANT: Update the actual file input's 'files' property
+            // This makes the files available to product-form.js on submission
+            const dataTransfer = new DataTransfer();
+            allFiles.forEach(file => dataTransfer.items.add(file));
+            fileInput.files = dataTransfer.files;
+            console.log(`[Upload Script ${sectionId}] Oppdaterte fileInput.files. Antall: ${fileInput.files.length}`);
+
+            // Update UI
+            renderPreview();
+            if (selectedVariantConfig) {
+                disableOtherRadios(selectedVariantConfig.value); // Lock variant choice
+            }
+            fileError.style.display = 'none'; // Hide error on success
+        });
+
+        // Handle click on the delete button
+        deleteButton.addEventListener('click', resetUpload);
+
+        // --- REMOVED ---
+        // Removed the conflicting 'click' listener on the submit button.
+        // Validation now happens entirely within product-form.js onSubmitHandler.
+        // console.log(`[Upload Script ${sectionId}] REMOVED validation listener on submit button.`);
+
+        // Final check for initial state (in case no variant is pre-selected)
+        const anyChecked = Array.from(variantRadios).some(radio => radio.checked);
+        if (!anyChecked && uploadSection) {
+            uploadSection.style.display = 'none';
+        }
+
+      }); // End DOMContentLoaded
+    </script>
+
+    <style>
+      /* Style for disabled variant labels (optional) */
+      .disabled-variant-label {
+        opacity: 0.5;
+        cursor: not-allowed;
+        text-decoration: line-through; /* Added line-through */
+      }
+
+      /* Basic styling for buttons and layout */
+      .upload-section {
+          border: 1px dashed #ccc;
+          padding: 15px;
+          border-radius: 8px;
+          background-color: #f9f9f9;
+      }
+
+      .button { /* General button styling */
+          padding: 10px 15px;
+          border: 1px solid transparent; /* Added base border */
+          border-radius: 5px;
+          cursor: pointer;
+          font-size: 1em;
+          transition: background-color 0.2s ease, opacity 0.2s ease, color 0.2s ease, border-color 0.2s ease;
+          margin-right: 5px;
+          line-height: 1.2; /* Ensure text fits */
+          appearance: none; /* Reset default browser styles */
+      }
+       .button:disabled { /* General disabled state */
+           opacity: 0.6;
+           cursor: not-allowed;
+       }
+
+      .upload-trigger-button {
+          background-color: #3b82f6; /* Blue */
+          color: white;
+          border-color: #3b82f6;
+      }
+      .upload-trigger-button:hover:not(:disabled) {
+          background-color: #2563eb;
+          border-color: #2563eb;
+      }
+
+      .delete-button {
+          background-color: #ef4444; /* Red */
+          color: white;
+          border-color: #ef4444;
+      }
+      .delete-button:hover:not(:disabled) {
+          background-color: #dc2626;
+          border-color: #dc2626;
+      }
+
+      .file-preview {
+          margin-top: 10px;
+          font-size: 0.9em;
+          background-color: #fff;
+          padding: 10px;
+          border: 1px solid #eee;
+          border-radius: 4px;
+      }
+
+      .file-preview div {
+          margin-bottom: 5px;
+          padding: 2px 0; /* Reduced padding */
+          word-break: break-all;
+      }
+       .file-preview div:last-child {
+           margin-bottom: 0;
+       }
+
+      .file-error {
+          font-weight: bold;
+          margin-top: 10px;
+          color: #dc2626; /* Use a red consistent with delete button */
+          padding: 8px;
+          background-color: #fee2e2; /* Light red background */
+          border: 1px solid #fca5a5; /* Red border */
+          border-radius: 4px;
+      }
+
+      /* Ensure theme's disabled submit button style is respected or overridden if needed */
+      /* This style from previous version might still be useful if theme doesn't handle it well */
+      .button.product-form__submit:disabled {
+         opacity: 0.6 !important;
+         cursor: not-allowed !important;
+       }
+
+    </style>
+    
